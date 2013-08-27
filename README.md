@@ -1,4 +1,4 @@
-sparquel
+Sparquel
 ========
 
-SQL shell
+This is Sparquel, simple SQL shell (now).
