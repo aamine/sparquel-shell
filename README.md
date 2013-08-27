@@ -1,0 +1,4 @@
+sparquel
+========
+
+SQL shell
