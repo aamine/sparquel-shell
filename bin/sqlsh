@@ -1,0 +1,197 @@
+#!/usr/bin/env ruby
+
+require 'pg'
+require 'readline'
+
+module Sparquel
+  class CommandLineEvaluator
+    def CommandLineEvaluator.main
+      new.mainloop
+    end
+
+    def initialize
+      @prompt = Prompt.new('> ')
+      @data_source = PostgresDataSource.new(name: 'dev', host: 'localhost', port: 5432, database: 'dev', user: 'aamine', password: nil)
+    end
+
+    attr_reader :prompt
+    attr_reader :data_source
+    attr_reader :connection
+
+    def mainloop
+      @connection = @data_source.open
+      @reader = StatementReader.new(@prompt)
+      catch(:sparqual_main_loop) {
+        while true
+          begin
+            stmt = @reader.next or break
+            result = stmt.execute(self)
+            result.display if result
+          rescue ApplicationError => err
+            $stderr.puts err.message
+          end
+        end
+      }
+    end
+
+    def exit
+      throw :sparqual_main_loop
+    end
+  end
+
+  class ApplicationError < StandardError; end
+  class UserInputError < ApplicationError; end
+
+  class StatementReader
+    def initialize(prompt)
+      @prompt = prompt
+    end
+
+    def next
+      while true
+        line = Readline.readline(@prompt.get)
+        stmt = if line.strip.empty?
+          nil
+        elsif meta_command?(line)
+          read_meta_command(line)
+        else
+          read_sql_statement(line)
+        end
+        next unless stmt
+        return stmt
+      end
+    rescue Interrupt
+      $stderr.puts "interrupted"
+      retry
+    rescue IOError => err
+      $stderr.puts err.message if $VERBOSE
+      nil
+    end
+
+    def meta_command?(first_line)
+      MetaCommand.declared?(first_line.strip.split.first)
+    end
+
+    def read_meta_command(first_line)
+      cmd, args = first_line.strip.split
+      MetaCommand.polymorphic_new(cmd, args)
+    end
+
+    def read_sql_statement(first_line)
+      SQLStatement.new(first_line.strip)
+    end
+  end
+
+  class Prompt
+    def initialize(template)
+      @template = template
+    end
+
+    def get
+      @template.dup
+    end
+  end
+
+  class MetaCommand
+    COMMANDS = {}
+
+    def self.declare(name)
+      COMMANDS[name] = self
+    end
+
+    def MetaCommand.names
+      COMMANDS.keys
+    end
+
+    def MetaCommand.declared?(name)
+      COMMANDS.key?(name)
+    end
+
+    def MetaCommand.polymorphic_new(cmd, args)
+      c = COMMANDS[cmd] or
+          raise UserInputError, "unknown command: #{cmd}"
+      c.new(cmd, args)
+    end
+
+    def initialize(cmd, args)
+      @cmd = cmd
+      @args = args
+    end
+
+    attr_reader :cmd
+    attr_reader :args
+
+    def execute(evaluator)
+      nil
+    end
+  end
+
+  class ExitCommand < MetaCommand
+    declare 'exit'
+    declare 'quit'
+    declare '\q'
+
+    def execute(evaluator)
+      evaluator.exit
+      nil
+    end
+  end
+
+  class SQLStatement
+    def initialize(source)
+      @source = source
+    end
+
+    attr_reader :source
+
+    def execute(evaluator)
+      evaluator.connection.execute(source)
+    end
+  end
+
+  class PostgresDataSource
+    def initialize(name:, host: 'localhost', port: 5432, database: 'postgres', user: ENV['LOGNAME'], password:)
+      @name = name
+      @host = host
+      @port = port
+      @database = database
+      @user = user
+      @password = password
+    end
+
+    attr_reader :name
+
+    def open
+      conn = PG::Connection.open(host: @host, port: @port, dbname: @database, user: @user, password: @password)
+      PostgresConnection.new(conn)
+    end
+  end
+
+  class PostgresConnection
+    def initialize(connection)
+      @connection = connection
+    end
+
+    def execute(source)
+      PostgresResult.new(@connection.exec(source))
+    rescue PG::Error => err
+      raise SQLError, err.message
+    end
+  end
+
+  class SQLError < ApplicationError; end
+
+  class PostgresResult
+    def initialize(result)
+      @result = result
+    end
+
+    def display
+      @result.each do |record|
+        p record
+      end
+    end
+  end
+end
+
+Sparquel::CommandLineEvaluator.main
