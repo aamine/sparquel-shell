@@ -1,26 +1,28 @@
-require 'sparquel/postgresdatasource'
+require 'sparquel/datasourcemanager'
 require 'sparquel/evaluable'
 require 'sparquel/builtins'
 require 'sparquel/exception'
 require 'readline'
-require 'forwardable'
 
 module Sparquel
   class CommandLineEvaluator
     def CommandLineEvaluator.main
-      new.mainloop
+      prompt = Prompt.new('> ')
+      input = $stdin.tty? ? TerminalInput.new(prompt) : FileInput.new($stdin)
+      dsmgr = DataSourceManager.new
+      new(input, dsmgr).mainloop
     end
 
-    def initialize
-      @prompt = Prompt.new('> ')
-      @data_source = PostgresDataSource.new(name: 'dev', host: 'localhost', port: 5432, database: 'dev', user: 'aamine', password: nil)
+    def initialize(input, data_source_manager)
+      @reader = StatementReader.new(self, input)
+      @data_source_manager = data_source_manager
     end
 
-    attr_reader :prompt
-    attr_reader :data_source
+    def data_source
+      @data_source_manager.current
+    end
 
     def mainloop
-      @reader = StatementReader.new(self, @prompt)
       catch(:sparqual_main_loop) {
         while true
           begin
@@ -32,27 +34,53 @@ module Sparquel
           end
         end
       }
-      close_all_data_sources
+      @data_source_manager.close
     end
 
     def exit
       throw :sparqual_main_loop
     end
+  end
 
-    def close_all_data_sources
-      @data_source.close!
+  class Prompt
+    def initialize(template)
+      @template = template
+    end
+
+    def get
+      @template.dup
+    end
+  end
+
+  class TerminalInput
+    def initialize(prompt)
+      @prompt = prompt
+    end
+
+    def readline
+      Readline.readline(@prompt.get)
+    end
+  end
+
+  class FileInput
+    def initialize(f)
+      @f = f
+    end
+
+    def readline
+      @f.gets
     end
   end
 
   class StatementReader
-    def initialize(evaluator, prompt)
+    def initialize(evaluator, input)
       @evaluator = evaluator
-      @prompt = prompt
+      @input = input
     end
 
     def next
       while true
-        line = Readline.readline(@prompt.get)
+        line = @input.readline
         stmt = if line.strip.empty?
           nil
         elsif meta_command?(line)
@@ -82,16 +110,6 @@ module Sparquel
 
     def read_sql_statement(first_line)
       SQLStatement.new(@evaluator, first_line.strip)
-    end
-  end
-
-  class Prompt
-    def initialize(template)
-      @template = template
-    end
-
-    def get
-      @template.dup
     end
   end
 end
