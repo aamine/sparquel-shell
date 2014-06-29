@@ -17,6 +17,11 @@ module Sparquel
 
     attr_reader :name
 
+    def parameters
+      record = { name: @name, host: @host, port: @port, database: @database, user: @user }
+      LiteralResult.new(self, [PostgresGenericRecord.new(record)])
+    end
+
     def connection
       @connection ||= open
     end

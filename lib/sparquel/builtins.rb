@@ -13,6 +13,15 @@ module Sparquel
     end
   end
 
+  class ShowDataSourceCommand < MetaCommand
+    declare 'conn'
+    declare 'ds'
+
+    def execute
+      data_source.parameters
+    end
+  end
+
   class CurrentSchemaCommand < MetaCommand
     declare 'pwd'
 
