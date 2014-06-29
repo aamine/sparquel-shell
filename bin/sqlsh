@@ -252,28 +252,20 @@ module Sparquel
       $stderr.puts err.message
     end
 
-    def execute(query, params = nil)
-      connection.execute(query, params)
-    end
+    extend Forwardable
 
-    def list_schema
-      q = 'select schema_name from information_schema.schemata order by 1;'
-      execute(q).attach_record_class(PostgresSchema)
-    end
-
-    def current_schema
-      schema('sparquel')   # FIXME: get from search_path
-    end
-
-    def schema(name)
-      PostgresSchema.new(self, name)
-    end
+    def_delegators 'connection',
+      :execute,
+      :list_schema,
+      :current_schema,
+      :schema
   end
 
   class PostgresConnection
     def initialize(ds, connection)
       @ds = ds
       @connection = connection
+      @current_schema_name = nil
     end
 
     def close
@@ -286,6 +278,34 @@ $stderr.puts "[SQL] #{sql}#{params ? ' ' + params.inspect : ''}"
       PostgresResult.new(@ds, rs)
     rescue PG::Error => err
       raise SQLError, err.message
+    end
+
+    def session_parameter(name)
+      # SHOW statement does not support parameters
+      rec = execute("show #{name};").first or return nil
+      rec.to_a.first
+    end
+
+    def search_path
+      path = session_parameter('search_path') or return []
+      path.split(', ')
+    end
+
+    def current_schema_name
+      @current_schema_name ||= search_path.first
+    end
+
+    def list_schema
+      q = 'select schema_name from information_schema.schemata order by 1;'
+      execute(q).attach_record_class(PostgresSchema)
+    end
+
+    def current_schema
+      schema(current_schema_name)
+    end
+
+    def schema(name)
+      PostgresSchema.new(@ds, name)
     end
   end
 
