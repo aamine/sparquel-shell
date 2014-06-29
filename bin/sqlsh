@@ -46,6 +46,7 @@ module Sparquel
 
   class ApplicationError < StandardError; end
   class UserInputError < ApplicationError; end
+  class CommandOptionError < UserInputError; end
 
   class StatementReader
     def initialize(evaluator, prompt)
@@ -190,6 +191,16 @@ module Sparquel
     end
   end
 
+  class ChangeCurrentSchemaCommand < MetaCommand
+    declare 'cd'
+
+    def execute
+      raise CommandOptionError, "missing schema name or too many names" unless @args.size == 1
+      data_source.current_schema = schema(@args.first)
+      nil
+    end
+  end
+
   class ListSchemaCommand < MetaCommand
     declare 'lsn'
     declare 'dn'
@@ -258,6 +269,7 @@ module Sparquel
       :execute,
       :list_schema,
       :current_schema,
+      :current_schema=,
       :schema
   end
 
@@ -287,8 +299,23 @@ $stderr.puts "[SQL] #{sql}#{params ? ' ' + params.inspect : ''}"
     end
 
     def search_path
-      path = session_parameter('search_path') or return []
-      path.split(', ')
+      @search_path ||= begin
+        if path = session_parameter('search_path')
+          path.split(', ')
+        else
+          []
+        end
+      end
+    end
+
+    def sync_search_path_with_current_schema(name)
+      path = search_path.dup
+      path.unshift name unless path.first == name
+      execute "set search_path = #{path.join(', ')};"
+    end
+
+    def prepend_search_path(name)
+      self.search_path = [name] + search_path
     end
 
     def current_schema_name
@@ -302,6 +329,13 @@ $stderr.puts "[SQL] #{sql}#{params ? ' ' + params.inspect : ''}"
 
     def current_schema
       schema(current_schema_name)
+    end
+
+    def current_schema=(schema)
+      raise CommandOptionError, "no such schema: #{schema.name}" unless schema.exist?
+      return if schema.name == @current_schema_name
+      sync_search_path_with_current_schema schema.name
+      @current_schema_name = schema.name
     end
 
     def schema(name)
@@ -323,6 +357,11 @@ $stderr.puts "[SQL] #{sql}#{params ? ' ' + params.inspect : ''}"
 
     def inspect
       %Q(<\##{self.class} #{@name}>)
+    end
+
+    def exist?
+      q = "select 1 from information_schema.schemata where schema_name = $1 order by 1;"
+      @ds.execute(q, [@name]).to_a.size == 1
     end
 
     def objects
