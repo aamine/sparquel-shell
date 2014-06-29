@@ -4,7 +4,7 @@ Gem::Specification.new do |s|
   s.version = '0.1.0'
   s.summary = 'Sparquel SQL shell'
   s.description = 'powerful SQL shell'
-  s.license = 'MIT'
+  s.license = 'LGPL2.1'
 
   s.author = ['Minero Aoki']
   s.email = 'mineroaoki@gmail.com'
