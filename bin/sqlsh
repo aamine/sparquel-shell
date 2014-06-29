@@ -2,6 +2,8 @@
 
 require 'pg'
 require 'readline'
+require 'forwardable'
+require 'pry'
 
 module Sparquel
   class CommandLineEvaluator
@@ -16,26 +18,29 @@ module Sparquel
 
     attr_reader :prompt
     attr_reader :data_source
-    attr_reader :connection
 
     def mainloop
-      @connection = @data_source.open
-      @reader = StatementReader.new(@prompt)
+      @reader = StatementReader.new(self, @prompt)
       catch(:sparqual_main_loop) {
         while true
           begin
             stmt = @reader.next or break
-            result = stmt.execute(self)
+            result = stmt.execute
             result.display if result
           rescue ApplicationError => err
             $stderr.puts err.message
           end
         end
       }
+      close_all_data_sources
     end
 
     def exit
       throw :sparqual_main_loop
+    end
+
+    def close_all_data_sources
+      @data_source.close!
     end
   end
 
@@ -43,7 +48,8 @@ module Sparquel
   class UserInputError < ApplicationError; end
 
   class StatementReader
-    def initialize(prompt)
+    def initialize(evaluator, prompt)
+      @evaluator = evaluator
       @prompt = prompt
     end
 
@@ -73,12 +79,12 @@ module Sparquel
     end
 
     def read_meta_command(first_line)
-      cmd, args = first_line.strip.split
-      MetaCommand.polymorphic_new(cmd, args)
+      cmd, *args = first_line.strip.split
+      MetaCommand.polymorphic_new(@evaluator, cmd, args)
     end
 
     def read_sql_statement(first_line)
-      SQLStatement.new(first_line.strip)
+      SQLStatement.new(@evaluator, first_line.strip)
     end
   end
 
@@ -92,7 +98,45 @@ module Sparquel
     end
   end
 
-  class MetaCommand
+  class Evaluable
+    def initialize(evaluator)
+      @evaluator = evaluator
+    end
+
+    private
+
+    attr_reader :evaluator
+
+    def data_source
+      @evaluator.data_source
+    end
+
+    def execute_query(sql)
+      @evaluator.data_source.connection.execute(sql)
+    end
+
+    extend Forwardable
+
+    def_delegators '@evaluator.data_source',
+      :list_schema,
+      :current_schema,
+      :schema
+  end
+
+  class SQLStatement < Evaluable
+    def initialize(evaluator, source)
+      super evaluator
+      @source = source
+    end
+
+    attr_reader :source
+
+    def execute
+      execute_query(@source)
+    end
+  end
+
+  class MetaCommand < Evaluable
     COMMANDS = {}
 
     def self.declare(name)
@@ -107,13 +151,14 @@ module Sparquel
       COMMANDS.key?(name)
     end
 
-    def MetaCommand.polymorphic_new(cmd, args)
+    def MetaCommand.polymorphic_new(evaluator, cmd, args)
       c = COMMANDS[cmd] or
           raise UserInputError, "unknown command: #{cmd}"
-      c.new(cmd, args)
+      c.new(evaluator, cmd, args)
     end
 
-    def initialize(cmd, args)
+    def initialize(evaluator, cmd, args)
+      super evaluator
       @cmd = cmd
       @args = args
     end
@@ -121,7 +166,7 @@ module Sparquel
     attr_reader :cmd
     attr_reader :args
 
-    def execute(evaluator)
+    def execute
       nil
     end
   end
@@ -131,21 +176,41 @@ module Sparquel
     declare 'quit'
     declare '\q'
 
-    def execute(evaluator)
+    def execute
       evaluator.exit
       nil
     end
   end
 
-  class SQLStatement
-    def initialize(source)
-      @source = source
+  class ListSchemaCommand < MetaCommand
+    declare 'lsn'
+    declare 'dn'
+    declare '\dn'
+
+    def execute
+      list_schema
     end
+  end
 
-    attr_reader :source
+  class ListCommand < MetaCommand
+    declare 'ls'
 
-    def execute(evaluator)
-      evaluator.connection.execute(source)
+    def execute
+      schemata = @args.empty? ? [current_schema] : @args.map {|s| schema(s) }
+      CompositeResult.new(schemata.map(&:objects))
+    end
+  end
+
+  class RemoveCommand < MetaCommand
+    declare 'rm'
+
+    def execute
+      @args.each do |pattern|
+        current_schema.matched_objects(pattern).each do |obj|
+          obj.drop
+        end
+      end
+      nil
     end
   end
 
@@ -157,39 +222,209 @@ module Sparquel
       @database = database
       @user = user
       @password = password
+
+      @connection = nil
     end
 
     attr_reader :name
 
+    def connection
+      @connection ||= open
+    end
+
     def open
       conn = PG::Connection.open(host: @host, port: @port, dbname: @database, user: @user, password: @password)
-      PostgresConnection.new(conn)
+      PostgresConnection.new(self, conn)
+    end
+
+    def close!
+      @connection.close if @connection
+    rescue => err
+      # ignore
+      $stderr.puts err.message
+    end
+
+    def execute(query, params = nil)
+      connection.execute(query, params)
+    end
+
+    def list_schema
+      q = 'select schema_name from information_schema.schemata order by 1;'
+      execute(q).attach_record_class(PostgresSchema)
+    end
+
+    def current_schema
+      schema('sparquel')   # FIXME: get from search_path
+    end
+
+    def schema(name)
+      PostgresSchema.new(self, name)
     end
   end
 
   class PostgresConnection
-    def initialize(connection)
+    def initialize(ds, connection)
+      @ds = ds
       @connection = connection
     end
 
-    def execute(source)
-      PostgresResult.new(@connection.exec(source))
+    def close
+      @connection.close
+    end
+
+    def execute(sql, params = nil)
+$stderr.puts "[SQL] #{sql}#{params ? ' ' + params.inspect : ''}"
+      rs = params ? @connection.exec_params(sql, params) : @connection.exec(sql)
+      PostgresResult.new(@ds, rs)
     rescue PG::Error => err
       raise SQLError, err.message
     end
   end
 
+  class PostgresSchema
+    def PostgresSchema.for_record(rec, ds)
+      new(ds, rec['schema_name'])
+    end
+
+    def initialize(ds, name)
+      @ds = ds
+      @name = name
+    end
+
+    attr_reader :name
+
+    def inspect
+      %Q(<\##{self.class} #{@name}>)
+    end
+
+    def objects
+      q = "select table_schema, table_name, table_type from information_schema.tables where table_schema = $1 order by 1;"
+      @ds.execute(q, [name]).attach_record_class(PostgresObject)
+    end
+
+    def matched_objects(pattern)
+      q = "
+          select table_schema, table_name, table_type
+          from information_schema.tables
+          where table_schema = $1
+              and table_name #{match_operator} $2
+          order by 1;
+      "
+      @ds.execute(q, [@name, compile_pattern(pattern)]).attach_record_class(PostgresObject)
+    end
+
+    private
+
+    def match_operator
+      '~'
+    end
+
+    # shell glob -> POSIX regex
+    def compile_pattern(pat)
+      '^' + pat.gsub('*', '.*').gsub('?', '.') + '$'
+    end
+  end
+
+  class PostgresObject
+    def PostgresObject.for_record(rec, ds)
+      new(ds, rec['table_schema'], rec['table_name'], rec['table_type'].split.last.downcase)
+    end
+
+    def initialize(ds, schema, name, type)
+      @ds = ds
+      @schema = schema
+      @name = name
+      @type = type
+    end
+
+    attr_reader :schema
+    attr_reader :name
+    attr_reader :type
+
+    def inspect
+      %Q(<\##{self.class} #{@type} #{qualified_name}>)
+    end
+
+    def qualified_name
+      "#{@schema}.#{@name}"
+    end
+
+    def drop
+      @ds.execute "drop #{type} #{qualified_name} cascade;"
+    end
+  end
+
   class SQLError < ApplicationError; end
 
-  class PostgresResult
-    def initialize(result)
-      @result = result
+  class CompositeResult
+    def initialize(results)
+      @results = results
+    end
+
+    def each(&block)
+      @results.each do |result|
+        result.each(&block)
+      end
+    end
+
+    def to_a
+      @results.map {|r| r.to_a }.flatten
     end
 
     def display
+      @results.each do |result|
+        result.display
+      end
+    end
+  end
+
+  class PostgresResult
+    include Enumerable
+
+    def initialize(ds, result)
+      @ds = ds
+      @result = result
+      @record_class = nil
+    end
+
+    def attach_record_class(c)
+      @record_class = c
+      self
+    end
+
+    def each
       @result.each do |record|
+        r = PostgresGenericRecord.for_record(record)
+        yield @record_class ? @record_class.for_record(r, @ds) : r
+      end
+    end
+
+    def display
+      each do |record|
         p record
       end
+    end
+  end
+
+  class PostgresGenericRecord
+    class << self
+      alias for_record new
+    end
+
+    def initialize(record)
+      @record = record
+    end
+
+    def [](key)
+      @record[key]
+    end
+
+    def to_a
+      @record.values
+    end
+
+    def to_h
+      @record.dup
     end
   end
 end
