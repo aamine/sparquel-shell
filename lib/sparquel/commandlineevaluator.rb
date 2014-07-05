@@ -36,7 +36,7 @@ module Sparquel
           end
         end
       }
-      @data_source_manager.close
+      @data_source_manager.close!
     end
 
     def exit
