@@ -7,10 +7,12 @@ require 'readline'
 module Sparquel
   class CommandLineEvaluator
     def CommandLineEvaluator.main
-      prompt = Prompt.new('> ')
+      prompt = Prompt.new('%s:%w > ')
       input = $stdin.tty? ? TerminalInput.new(prompt) : FileInput.new($stdin)
       dsmgr = DataSourceManager.new
-      new(input, dsmgr).mainloop
+      evaluator = new(input, dsmgr)
+      prompt.evaluator = evaluator
+      evaluator.mainloop
     end
 
     def initialize(input, data_source_manager)
@@ -47,8 +49,23 @@ module Sparquel
       @template = template
     end
 
+    attr_accessor :template
+    attr_accessor :evaluator
+
     def get
-      @template.dup
+      @template.gsub(/%./) {|mark|
+        case mark
+        when '%%' then '%'
+        when '%s' then @evaluator.data_source.name
+        when '%h' then @evaluator.data_source.host
+        when '%p' then @evaluator.data_source.port
+        when '%d' then @evaluator.data_source.database
+        when '%u' then @evaluator.data_source.user
+        when '%w' then @evaluator.data_source.current_schema.name
+        else
+          raise ConfigError, "unknown prompt variable: #{mark.inspect}"
+        end
+      }
     end
   end
 
