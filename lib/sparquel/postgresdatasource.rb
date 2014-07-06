@@ -16,6 +16,10 @@ module Sparquel
     end
 
     attr_reader :name
+    attr_reader :host
+    attr_reader :port
+    attr_reader :database
+    attr_reader :user
 
     def parameters
       record = { name: @name, host: @host, port: @port, database: @database, user: @user }

@@ -45,5 +45,11 @@ module Sparquel
     def [](name)
       @data_sources[name] or raise ConfigError, "no such data source: #{name}"
     end
+
+    def close!
+      @data_sources.each_value do |ds|
+        ds.close!
+      end
+    end
   end
 end
