@@ -1,3 +1,4 @@
+require 'sparquel/applicationbuilder'
 require 'sparquel/datasourcemanager'
 require 'sparquel/evaluable'
 require 'sparquel/builtins'
@@ -7,11 +8,7 @@ require 'readline'
 module Sparquel
   class CommandLineEvaluator
     def CommandLineEvaluator.main
-      prompt = Prompt.new('%s:%w > ')
-      input = $stdin.tty? ? TerminalInput.new(prompt) : FileInput.new($stdin)
-      dsmgr = DataSourceManager.new
-      evaluator = new(input, dsmgr)
-      prompt.evaluator = evaluator
+      evaluator = ApplicationBuilder.build
       evaluator.mainloop
     end
 
